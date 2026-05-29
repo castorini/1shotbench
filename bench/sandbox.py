@@ -34,12 +34,30 @@ def sandbox_preflight_error() -> str | None:
     )
 
 
-def bwrap_is_functional() -> bool:
+def _bwrap_base_args() -> list[str]:
     bwrap = shutil.which("bwrap")
     if not bwrap:
+        return []
+    return [
+        bwrap,
+        "--unshare-user-try",
+        "--die-with-parent",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--bind",
+        "/",
+        "/",
+    ]
+
+
+def bwrap_is_functional() -> bool:
+    args = _bwrap_base_args()
+    if not args:
         return False
     proc = subprocess.run(
-        [bwrap, "--unshare-user-try", "--die-with-parent", "--", "true"],
+        [*args, "--", "true"],
         capture_output=True,
         check=False,
     )
@@ -122,25 +140,12 @@ def _wrap_with_bwrap(
     model_dir: Path,
     command: list[str],
 ) -> list[str]:
-    bwrap = shutil.which("bwrap")
-    if not bwrap:
+    args = _bwrap_base_args()
+    if not args:
         return command
 
     overlay_dir = model_dir / "sandbox-deny-overlay"
     overlay_dir.mkdir(parents=True, exist_ok=True)
-
-    args = [
-        bwrap,
-        "--unshare-user-try",
-        "--die-with-parent",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--bind",
-        "/",
-        "/",
-    ]
     for denied_path in denied_paths:
         if not denied_path.exists():
             denied_path.mkdir(parents=True, exist_ok=True)
