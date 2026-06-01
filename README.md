@@ -178,6 +178,42 @@ The web server uses `anserini-frontend` by default. To point it at another sibli
 PI_BENCH_TASK_DIR=other-task uvicorn bench.web:app --port 4010
 ```
 
+## Web app feature evaluation
+
+Judge agent-built web apps against PRD feature lists using Playwright evidence and an LLM judge.
+
+One-time setup for the browser layer:
+
+```sh
+cd bench/web_eval && npm install && npx playwright install chromium
+pip install -r requirements.txt
+```
+
+Run a full evaluation (example: Anserini evaluator workspace):
+
+```sh
+python3 -m bench.web_eval \
+  --project anserini-evaluator/gpt-workspace \
+  --features anserini-evaluator/features.yaml \
+  --prd anserini-evaluator/PRD-anserini-evaluator.md \
+  --label gpt-evaluator
+```
+
+Useful options:
+
+- `--base-url http://127.0.0.1:3000` and `--no-start` when the app is already running
+- `--dry-run` to skip the LLM judge only (still starts the app and runs Playwright unless `--no-start`)
+- `--judge-model` or env `WEB_EVAL_JUDGE_MODEL`
+
+Artifacts are written to `evals/<eval_id>/`:
+
+- `summary.json`, `report.md`, `run.json`
+- `evidence/<feature>.json` (compact browser packets)
+- `judgments/<feature>.json`
+- `screenshots/` and `jobs/` (browser layer)
+
+Correctness is `passed / total * 100`; **uncertain** counts as not passed.
+
 ## CLI
 
 Run one prompt against multiple model workspaces:
