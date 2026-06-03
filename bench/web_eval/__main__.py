@@ -16,12 +16,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--project",
         required=True,
-        help="Path to agent-generated app workspace (e.g. anserini-evaluator/gpt-workspace)",
+        help="Path to agent-generated app workspace",
     )
     parser.add_argument(
         "--features",
-        required=True,
-        help="YAML/JSON feature checks (e.g. anserini-evaluator/features.yaml)",
+        help="YAML/JSON feature checks. If omitted, features are generated from --prd.",
     )
     parser.add_argument("--prd", help="Optional PRD markdown for judge context")
     parser.add_argument("--profile", help="Optional eval-profile.yaml (overrides features `app` block)")
@@ -35,6 +34,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip LLM judge only; still starts the app (unless --no-start) and runs Playwright",
     )
     parser.add_argument("--judge-model", help="Override judge model (default: WEB_EVAL_JUDGE_MODEL or gpt-4o-mini)")
+    parser.add_argument("--max-generated-features", type=int, default=8, help="Maximum features to generate when --features is omitted")
+    parser.add_argument(
+        "--setup",
+        choices=["auto", "never"],
+        default="auto",
+        help="Whether to run conservative README setup/install commands before starting the app",
+    )
+    parser.add_argument(
+        "--no-agentic-evidence",
+        action="store_true",
+        help="Disable LLM-planned follow-up browser evidence collection",
+    )
     return parser
 
 
@@ -46,8 +57,8 @@ def main() -> int:
     if not project.is_absolute():
         project = ROOT_DIR / project
 
-    features = Path(args.features)
-    if not features.is_absolute():
+    features = Path(args.features) if args.features else None
+    if features and not features.is_absolute():
         features = ROOT_DIR / features
 
     prd = Path(args.prd) if args.prd else None
@@ -70,6 +81,9 @@ def main() -> int:
         no_start=args.no_start,
         dry_run=args.dry_run,
         judge_model=args.judge_model,
+        max_generated_features=args.max_generated_features,
+        setup_mode=args.setup,
+        agentic_evidence=not args.no_agentic_evidence,
     )
 
     try:

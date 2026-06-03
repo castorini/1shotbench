@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bench.config import ROOT_DIR, load_project_env
-from bench.web_eval.features import load_features_file
+from bench.web_eval.features import load_features_file, write_features
 from bench.web_eval.judge import JudgeClient, compute_correctness
 from bench.web_eval.prd import load_prd_context
 from bench.web_eval.profile import AppServer, resolve_app_profile
 from bench.web_eval.report import write_artifacts
-from bench.web_eval.schemas import BrowserAction, EvidencePacket, FeatureCheck, WebEvalSummary
+from bench.web_eval.schemas import BrowserAction, EvidencePacket, FeatureCheck, FeatureJudgment, WebEvalSummary
+from bench.web_eval.setup import collect_setup_context, run_project_setup
 
 
 EVALS_DIR = ROOT_DIR / "evals"
@@ -24,7 +25,7 @@ BROWSER_SCRIPT = WEB_EVAL_DIR / "browser.mjs"
 @dataclass
 class WebEvalOptions:
     project_path: Path
-    features_path: Path
+    features_path: Path | None = None
     prd_path: Path | None = None
     base_url: str | None = None
     profile_path: Path | None = None
@@ -33,6 +34,9 @@ class WebEvalOptions:
     no_start: bool = False
     dry_run: bool = False
     judge_model: str | None = None
+    max_generated_features: int = 8
+    setup_mode: str = "auto"
+    agentic_evidence: bool = True
 
 
 def _now_iso() -> str:
@@ -77,7 +81,25 @@ class WebEvalRunner:
         if not project_path.exists():
             raise FileNotFoundError(f"Project path not found: {project_path}")
 
-        features, app_data = load_features_file(options.features_path.resolve())
+        eval_id = options.eval_id or _make_eval_id()
+        output_dir = EVALS_DIR / eval_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        prd_context = load_prd_context(options.prd_path)
+        judge = JudgeClient(model=options.judge_model, dry_run=options.dry_run)
+        app_data = None
+        generated_features = False
+        if options.features_path:
+            features_path = options.features_path.resolve()
+            features, app_data = load_features_file(features_path)
+        else:
+            if not prd_context:
+                raise ValueError("Pass --features, or pass --prd so features can be generated from the PRD.")
+            features = judge.generate_features(prd_context, max_features=options.max_generated_features)
+            features_path = output_dir / "generated-features.yaml"
+            write_features(features_path, features)
+            generated_features = True
+
         profile_path = options.profile_path
         profile_data = None
         if profile_path and profile_path.exists():
@@ -89,6 +111,16 @@ class WebEvalRunner:
         elif app_data:
             profile_data = app_data
 
+        setup_context = collect_setup_context(project_path, options.prd_path)
+        planned_setup_commands = judge.plan_setup_commands(setup_context, project_path=project_path)
+        setup_results = run_project_setup(
+            project_path,
+            output_dir,
+            mode=options.setup_mode,
+            planned_commands=planned_setup_commands or None,
+            setup_context=setup_context,
+        )
+
         profile = resolve_app_profile(
             project_path,
             base_url=options.base_url,
@@ -96,18 +128,12 @@ class WebEvalRunner:
             no_start=options.no_start,
         )
 
-        eval_id = options.eval_id or _make_eval_id()
-        output_dir = EVALS_DIR / eval_id
-        output_dir.mkdir(parents=True, exist_ok=True)
-
         started_at = _now_iso()
         server = AppServer(profile, project_path)
         load_project_env()
         try:
             if not options.no_start and profile.start_command:
                 server.start()
-            prd_context = load_prd_context(options.prd_path)
-            judge = JudgeClient(model=options.judge_model, dry_run=options.dry_run)
             evidence_by_feature: dict[str, EvidencePacket] = {}
             judgments = []
             for feature in features:
@@ -115,20 +141,61 @@ class WebEvalRunner:
                     feature=feature,
                     profile=profile,
                     output_dir=output_dir,
+                    suffix="scripted",
                 )
+                if options.agentic_evidence:
+                    try:
+                        planned_steps = judge.plan_evidence_steps(feature, evidence, prd_context)
+                    except Exception as exc:
+                        planned_steps = []
+                        evidence.checks["agentic_plan_error"] = str(exc)
+                    if planned_steps:
+                        planned_feature = FeatureCheck(
+                            id=feature.id,
+                            title=feature.title,
+                            description=feature.description,
+                            acceptance=feature.acceptance,
+                            steps=[*feature.steps, *planned_steps],
+                        )
+                        planned_evidence = self._collect_evidence(
+                            feature=planned_feature,
+                            profile=profile,
+                            output_dir=output_dir,
+                            suffix="agentic",
+                        )
+                        evidence = _merge_evidence(evidence, planned_evidence, planned_steps)
                 evidence_by_feature[feature.id] = evidence
-                judgment = judge.judge_feature(feature, evidence, prd_context)
+                try:
+                    judgment = judge.judge_feature(
+                        feature,
+                        evidence,
+                        prd_context,
+                        setup_context=setup_context,
+                        setup_results=setup_results,
+                    )
+                except Exception as exc:
+                    judgment = FeatureJudgment(
+                        feature_id=feature.id,
+                        verdict="uncertain",
+                        confidence=0.0,
+                        reason=f"Judge call failed: {exc}",
+                        evidence_used=["judge_error"],
+                    )
                 judgments.append(judgment)
 
             passed, failed, uncertain, pct = compute_correctness(judgments)
             ended_at = _now_iso()
+            failed_setup = [result for result in setup_results if result.status == "failed"]
+            notes = None
+            if failed_setup:
+                notes = f"{len(failed_setup)} setup command(s) failed; see setup.json."
             summary = WebEvalSummary(
                 eval_id=eval_id,
                 label=options.label,
                 started_at=started_at,
                 ended_at=ended_at,
                 project_path=str(project_path),
-                features_path=str(options.features_path.resolve()),
+                features_path=str(features_path),
                 prd_path=str(options.prd_path) if options.prd_path else None,
                 base_url=profile.base_url,
                 total_features=len(features),
@@ -139,17 +206,21 @@ class WebEvalRunner:
                 judgments=judgments,
                 git_commit=_git_commit(self.root_dir),
                 judge_model=None if options.dry_run else judge.model,
-                notes=None,
+                notes=notes,
             )
             write_artifacts(output_dir, summary=summary, evidence_by_feature=evidence_by_feature, judgments=judgments)
             metadata = {
                 "options": {
                     "project_path": str(project_path),
-                    "features_path": str(options.features_path),
+                    "features_path": str(features_path),
+                    "features_generated": generated_features,
                     "prd_path": str(options.prd_path) if options.prd_path else None,
                     "base_url": profile.base_url,
                     "no_start": options.no_start,
                     "dry_run": options.dry_run,
+                    "setup_mode": options.setup_mode,
+                    "agentic_evidence": options.agentic_evidence,
+                    "planned_setup_commands": [command.to_dict() for command in planned_setup_commands],
                 },
                 "app_profile": profile.to_dict(),
             }
@@ -164,6 +235,7 @@ class WebEvalRunner:
         feature: FeatureCheck,
         profile,
         output_dir: Path,
+        suffix: str = "scripted",
     ) -> EvidencePacket:
         job = {
             "featureId": feature.id,
@@ -173,8 +245,8 @@ class WebEvalRunner:
         }
         jobs_dir = output_dir / "jobs"
         jobs_dir.mkdir(exist_ok=True)
-        job_path = jobs_dir / f"{feature.id}.json"
-        evidence_path = output_dir / "evidence" / f"{feature.id}.browser.json"
+        job_path = jobs_dir / f"{feature.id}.{suffix}.json"
+        evidence_path = output_dir / "evidence" / f"{feature.id}.{suffix}.browser.json"
         evidence_path.parent.mkdir(exist_ok=True)
         job_path.write_text(json.dumps(job, indent=2) + "\n", encoding="utf-8")
 
@@ -208,11 +280,33 @@ def _evidence_from_raw(raw: dict) -> EvidencePacket:
         visible_text=raw.get("visible_text"),
         aria_snapshot=raw.get("aria_snapshot"),
         screenshot_path=raw.get("screenshot_path"),
+        interactive_elements=list(raw.get("interactive_elements") or []),
         console_errors=list(raw.get("console_errors") or []),
         network_errors=list(raw.get("network_errors") or []),
         action_log=list(raw.get("action_log") or []),
         checks=dict(raw.get("checks") or {}),
         error=raw.get("error"),
+    )
+
+
+def _merge_evidence(scripted: EvidencePacket, planned: EvidencePacket, planned_steps: list[BrowserAction]) -> EvidencePacket:
+    checks = dict(scripted.checks)
+    checks.update(planned.checks)
+    checks["scripted_visible_text"] = scripted.visible_text
+    checks["agentic_planned_steps"] = [_step_to_json(step) for step in planned_steps]
+    return EvidencePacket(
+        feature_id=scripted.feature_id,
+        url=planned.url or scripted.url,
+        page_title=planned.page_title or scripted.page_title,
+        visible_text=planned.visible_text or scripted.visible_text,
+        aria_snapshot=planned.aria_snapshot or scripted.aria_snapshot,
+        screenshot_path=planned.screenshot_path or scripted.screenshot_path,
+        interactive_elements=planned.interactive_elements or scripted.interactive_elements,
+        console_errors=[*scripted.console_errors, *planned.console_errors],
+        network_errors=[*scripted.network_errors, *planned.network_errors],
+        action_log=[*scripted.action_log, "agentic_plan_start", *planned.action_log],
+        checks=checks,
+        error=planned.error or scripted.error,
     )
 
 

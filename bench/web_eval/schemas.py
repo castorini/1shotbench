@@ -51,6 +51,7 @@ class EvidencePacket:
     visible_text: str | None = None
     aria_snapshot: str | None = None
     screenshot_path: str | None = None
+    interactive_elements: list[dict[str, Any]] = field(default_factory=list)
     console_errors: list[str] = field(default_factory=list)
     network_errors: list[str] = field(default_factory=list)
     action_log: list[str] = field(default_factory=list)
@@ -65,6 +66,7 @@ class EvidencePacket:
             "visible_text": _truncate(self.visible_text, max_text),
             "aria_snapshot": _truncate(self.aria_snapshot, max_aria),
             "screenshot_path": self.screenshot_path,
+            "interactive_elements": self.interactive_elements[:80],
             "console_errors": self.console_errors[:10],
             "network_errors": self.network_errors[:10],
             "action_log": self.action_log[-20:],

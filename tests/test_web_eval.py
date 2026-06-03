@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import socket
 import tempfile
 import unittest
 from pathlib import Path
 
-from bench.web_eval.features import load_features
-from bench.web_eval.judge import JudgeClient, compute_correctness, _parse_judge_json
+from bench.web_eval.features import load_features, write_features
+from bench.web_eval.judge import JudgeClient, compute_correctness, _features_from_json, _parse_judge_json
 from bench.web_eval.prd import load_prd_context
+from bench.web_eval.profile import resolve_app_profile
 from bench.web_eval.report import render_markdown
+from bench.web_eval.setup import PlannedSetupCommand, collect_setup_context, discover_readme_setup_commands, run_project_setup
 from bench.web_eval.schemas import EvidencePacket, FeatureCheck, FeatureJudgment, WebEvalSummary
 
 
@@ -34,6 +37,293 @@ class WebEvalSchemaTests(unittest.TestCase):
             self.assertEqual(len(features), 1)
             self.assertEqual(features[0].id, "f1")
             self.assertEqual(features[0].steps[0].action, "open")
+
+
+    def test_generated_features_from_json(self) -> None:
+        features = _features_from_json(
+            {
+                "features": [
+                    {
+                        "id": "Search Works",
+                        "title": "Search works",
+                        "description": "Users can search",
+                        "acceptance": "A query produces results",
+                        "steps": [{"action": "open", "path": "/"}, {"action": "snapshot"}],
+                    }
+                ]
+            },
+            max_features=4,
+        )
+        self.assertEqual(features[0].id, "search-works")
+        self.assertEqual(features[0].steps[1].action, "snapshot")
+
+    def test_write_features_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "features.yaml"
+            write_features(path, [FeatureCheck("f1", "Title", "desc", "accept")])
+            loaded = load_features(path)
+            self.assertEqual(loaded[0].id, "f1")
+
+    def test_discover_readme_setup_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text(
+                "## Setup\n```sh\nnpm install\nnode setup/install-fatjar.js\nrm -rf bad\n```\n",
+                encoding="utf-8",
+            )
+            commands = [command for command, _ in discover_readme_setup_commands(root)]
+            self.assertIn("npm install", commands)
+            self.assertIn("node setup/install-fatjar.js", commands)
+            self.assertNotIn("rm -rf bad", commands)
+
+
+    def test_setup_applies_generic_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+            root = Path(tmp)
+            results = run_project_setup(
+                root,
+                Path(out),
+                timeout_seconds=1,
+                planned_commands=[PlannedSetupCommand("APP_CONFIG=$PWD/config.json")],
+            )
+            self.assertEqual(results[0].status, "completed")
+            self.assertEqual(results[0].reason, "set APP_CONFIG")
+
+    def test_setup_expands_env_vars_in_allowed_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+            root = Path(tmp)
+            target = root / "artifact.txt"
+            target.write_text("ok", encoding="utf-8")
+            results = run_project_setup(
+                root,
+                Path(out),
+                timeout_seconds=2,
+                planned_commands=[
+                    PlannedSetupCommand("ARTIFACT=$PWD/artifact.txt"),
+                    PlannedSetupCommand("test -f $ARTIFACT"),
+                ],
+            )
+            self.assertEqual([result.status for result in results], ["completed", "completed"])
+
+    def test_setup_allows_combined_curl_output_flag(self) -> None:
+        from bench.web_eval.setup import _is_allowed_setup_command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            allowed, reason = _is_allowed_setup_command(
+                ["curl", "-fLo", "download.bin", "https://example.test/download.bin"],
+                root,
+                root,
+            )
+            self.assertTrue(allowed, reason)
+
+    def test_setup_supports_project_local_stdout_redirection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+            root = Path(tmp)
+            setup_dir = root / "setup"
+            setup_dir.mkdir()
+            script = setup_dir / "print_result.py"
+            script.write_text('print("map\tall\t0.3123")\n', encoding="utf-8")
+            results = run_project_setup(
+                root,
+                Path(out),
+                timeout_seconds=2,
+                planned_commands=[PlannedSetupCommand("python setup/print_result.py > eval.txt")],
+            )
+            self.assertEqual(results[0].status, "completed")
+            self.assertEqual((root / "eval.txt").read_text(encoding="utf-8"), "map\tall\t0.3123\n")
+
+    def test_setup_allows_grep_q_project_file_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+            root = Path(tmp)
+            (root / "eval.txt").write_text("map\tall\t0.3123\n", encoding="utf-8")
+            results = run_project_setup(
+                root,
+                Path(out),
+                timeout_seconds=2,
+                planned_commands=[PlannedSetupCommand(r"grep -q $'map\tall\t0.3123' eval.txt")],
+            )
+            self.assertEqual(results[0].status, "completed")
+
+    def test_setup_grep_verification_tolerates_metric_padding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+            root = Path(tmp)
+            (root / "eval.txt").write_text("map                  \tall\t0.3123\n", encoding="utf-8")
+            results = run_project_setup(
+                root,
+                Path(out),
+                timeout_seconds=2,
+                planned_commands=[PlannedSetupCommand(r"grep -q $'map\tall\t0.3123' eval.txt")],
+            )
+            self.assertEqual(results[0].status, "completed")
+
+    def test_setup_allows_playwright_browser_install_command(self) -> None:
+        from bench.web_eval.setup import _is_allowed_setup_command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            allowed, reason = _is_allowed_setup_command(
+                ["npx", "playwright", "install", "chromium"],
+                root,
+                root,
+            )
+            self.assertTrue(allowed, reason)
+
+    def test_setup_normalizes_npx_playwright_install_to_yes(self) -> None:
+        from bench.web_eval.setup import _is_allowed_setup_command, _normalize_setup_argv
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            argv = _normalize_setup_argv(["npx", "playwright", "install", "chromium"])
+            self.assertEqual(argv, ["npx", "--yes", "playwright", "install", "chromium"])
+            allowed, reason = _is_allowed_setup_command(argv, root, root)
+            self.assertTrue(allowed, reason)
+
+    def test_setup_derives_maven_metadata_recovery_plan(self) -> None:
+        from bench.web_eval.setup import _maven_download_recovery_plan, _rewrite_maven_download_argv
+
+        argv = [
+            "curl",
+            "-fL",
+            "-o",
+            "anserini-0.37.1-fatjar.jar",
+            "https://repo1.maven.org/maven2/io/anserini/anserini/0.37.1/anserini-0.37.1-fatjar.jar",
+        ]
+        plan = _maven_download_recovery_plan(argv)
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(
+            plan["metadata_url"],
+            "https://repo1.maven.org/maven2/io/anserini/anserini/maven-metadata.xml",
+        )
+        rewritten = _rewrite_maven_download_argv(argv, "0.37.1", "2.1.1")
+        self.assertIn("anserini-2.1.1-fatjar.jar", rewritten)
+        self.assertTrue(rewritten[-1].endswith("/2.1.1/anserini-2.1.1-fatjar.jar"))
+
+    def test_setup_maven_recovery_updates_only_matching_version_env(self) -> None:
+        from bench.web_eval.setup import _update_version_env_after_recovery
+
+        env = {"ANSERINI_VERSION": "0.37.1", "NODE_VERSION": "20", "OTHER": "0.37.1"}
+        _update_version_env_after_recovery(env, "2.1.1", "0.37.1")
+        self.assertEqual(env["ANSERINI_VERSION"], "2.1.1")
+        self.assertEqual(env["NODE_VERSION"], "20")
+        self.assertEqual(env["OTHER"], "0.37.1")
+
+    def test_setup_extracts_java_classpath_jar(self) -> None:
+        from bench.web_eval.setup import _java_classpath_jar
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(
+                _java_classpath_jar(["java", "-cp", "lib/example-1.0.jar", "example.Main"], root),
+                (root / "lib/example-1.0.jar").resolve(),
+            )
+
+    def test_setup_context_includes_nested_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "app"
+            nested.mkdir()
+            (nested / "package.json").write_text('{"scripts":{"start":"node server.js"}}', encoding="utf-8")
+            context = collect_setup_context(root)
+            manifest_paths = [item["path"] for item in context["manifests"]]
+            self.assertTrue(any(path.endswith("/app/package.json") for path in manifest_paths))
+
+    def test_setup_repairs_npm_install_cwd_to_nested_manifest(self) -> None:
+        from bench.web_eval.setup import commands_from_json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "app"
+            nested.mkdir()
+            (nested / "package.json").write_text('{"scripts":{"start":"node server.js"}}', encoding="utf-8")
+            commands = commands_from_json([{"command": "npm install", "cwd": str(root)}], root)
+            self.assertEqual(Path(commands[0].cwd), nested)
+
+    def test_setup_rejects_java_usage_only_success(self) -> None:
+        from bench.web_eval.setup import _looks_like_usage_only_success
+
+        self.assertTrue(
+            _looks_like_usage_only_success(
+                ["java", "-cp", "x.jar", "example.Main"],
+                "",
+                "Usage: SearchCollection -index [path] -output [file]\nOptions:\n -index VAL",
+            )
+        )
+        self.assertFalse(
+            _looks_like_usage_only_success(
+                ["java", "-cp", "x.jar", "example.Main"],
+                "Total run time: 00:00:02",
+                "Index folder already exists!\nOptions were parsed",
+            )
+        )
+
+    def test_setup_rejects_java_error_output_success(self) -> None:
+        from bench.web_eval.setup import _post_command_failure_reason
+
+        reason = _post_command_failure_reason(
+            ["java", "-cp", "x.jar", "example.Main", "-output", "missing.txt"],
+            Path("/tmp"),
+            "Total run time: 00:00:00",
+            'Error: "cacm" does not refer to valid topics.',
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("error", reason.lower())
+
+    def test_profile_repairs_invalid_configured_cwd_to_nested_app(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "app"
+            nested.mkdir()
+            (nested / "package.json").write_text(
+                json.dumps({"scripts": {"start": "node server.js"}}),
+                encoding="utf-8",
+            )
+            (nested / "server.js").write_text("", encoding="utf-8")
+            profile = resolve_app_profile(
+                root,
+                base_url=None,
+                profile_data={"port": 3123, "start_command": ["npm", "start"], "cwd": ".", "env": {"PORT": "3123"}},
+                no_start=False,
+            )
+            self.assertEqual(Path(profile.cwd), nested)
+            self.assertEqual(profile.env["PORT"], "3123")
+            self.assertEqual(profile.base_url, "http://127.0.0.1:3123")
+
+    def test_profile_avoids_occupied_local_port(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                json.dumps({"scripts": {"start": "node server.js"}}),
+                encoding="utf-8",
+            )
+            (root / "server.js").write_text("", encoding="utf-8")
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+                sock.listen(1)
+                occupied = sock.getsockname()[1]
+                profile = resolve_app_profile(
+                    root,
+                    base_url=None,
+                    profile_data={"port": occupied, "start_command": ["npm", "start"], "cwd": ".", "env": {"PORT": str(occupied)}},
+                    no_start=False,
+                )
+            self.assertNotEqual(profile.base_url, f"http://127.0.0.1:{occupied}")
+            self.assertNotEqual(profile.env["PORT"], str(occupied))
+
+    def test_setup_context_includes_referenced_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("Use `install-anserini-fatjar` before running.\n", encoding="utf-8")
+            context = collect_setup_context(root)
+            names = [skill["name"] for skill in context["referenced_skills"]]
+            self.assertIn("install-anserini-fatjar", names)
+            hint_commands = [
+                command
+                for hint in context["setup_hints"]
+                for command in hint.get("commands", [])
+            ]
+            self.assertIn("java -version", hint_commands)
 
     def test_compute_correctness(self) -> None:
         judgments = [

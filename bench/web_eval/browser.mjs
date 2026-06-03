@@ -38,6 +38,7 @@ const evidence = {
   visible_text: null,
   aria_snapshot: null,
   screenshot_path: null,
+  interactive_elements: [],
   console_errors: [],
   network_errors: [],
   action_log: [],
@@ -48,6 +49,11 @@ const evidence = {
 function truncate(text, max) {
   if (!text) return text;
   return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
+}
+
+function tail(text, max) {
+  if (!text) return text;
+  return text.length <= max ? text : `...${text.slice(text.length - max + 3)}`;
 }
 
 function resolveURL(target) {
@@ -70,13 +76,126 @@ async function captureState(page) {
   evidence.url = page.url();
   evidence.page_title = await page.title();
   const bodyText = await page.locator('body').innerText().catch(() => '');
-  evidence.visible_text = truncate(bodyText.replace(/\s+/g, ' ').trim(), 4000);
+  const normalizedBody = bodyText.replace(/\s+/g, ' ').trim();
+  evidence.visible_text = truncate(normalizedBody, 4000);
+  evidence.checks.body_text_tail = tail(normalizedBody, 4000);
+  evidence.checks.result_like_text = await collectResultLikeText(page);
+  evidence.checks.numeric_candidates = collectNumericCandidates(normalizedBody);
+  evidence.interactive_elements = await collectInteractiveElements(page);
   try {
     const snapshot = await page.locator('body').ariaSnapshot();
     evidence.aria_snapshot = truncate(snapshot, 6000);
   } catch (err) {
     evidence.action_log.push(`aria_snapshot_failed: ${err.message}`);
   }
+}
+
+async function collectInteractiveElements(page) {
+  return await page
+    .locator('button, a, input, textarea, select, [role="button"], [role="link"], [role="tab"], [role="menuitem"]')
+    .evaluateAll((nodes) =>
+      nodes.slice(0, 120).map((node, index) => {
+        const el = node;
+        const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const attrs = {};
+        for (const name of ['id', 'name', 'type', 'role', 'aria-label', 'placeholder', 'value', 'href']) {
+          const value = el.getAttribute && el.getAttribute(name);
+          if (value) attrs[name] = value;
+        }
+        return {
+          index,
+          tag: el.tagName ? el.tagName.toLowerCase() : '',
+          text: text.slice(0, 120),
+          attributes: attrs,
+          disabled: Boolean(el.disabled || el.getAttribute?.('aria-disabled') === 'true'),
+        };
+      })
+    )
+    .catch(() => []);
+}
+
+async function clickByText(page, step) {
+  const text = step.text;
+  const exact = !!step.exact;
+  const timeout = step.timeout ?? 15000;
+  const roleCandidates = [
+    page.getByRole('button', { name: text, exact }),
+    page.getByRole('link', { name: text, exact }),
+  ];
+  for (const candidate of roleCandidates) {
+    const first = candidate.first();
+    if (await first.isVisible({ timeout: 500 }).catch(() => false)) {
+      await first.click({ timeout });
+      return;
+    }
+  }
+
+  const matches = page.getByText(text, { exact });
+  const count = Math.min(await matches.count().catch(() => 0), 50);
+  for (let i = 0; i < count; i += 1) {
+    const candidate = matches.nth(i);
+    if (await candidate.isVisible({ timeout: 500 }).catch(() => false)) {
+      await candidate.click({ timeout });
+      return;
+    }
+  }
+
+  await matches.first().click({ timeout });
+}
+
+async function collectResultLikeText(page) {
+  const selectors = [
+    '[data-testid*="score" i]',
+    '[data-testid*="result" i]',
+    '[data-testid*="metric" i]',
+    '[data-testid*="eval" i]',
+    '[id*="score" i]',
+    '[id*="result" i]',
+    '[id*="metric" i]',
+    '[id*="meta" i]',
+    '[id*="eval" i]',
+    '[class*="score" i]',
+    '[class*="result" i]',
+    '[class*="metric" i]',
+    '[class*="meta" i]',
+    '[class*="eval" i]',
+    '[role="status"]',
+    '[aria-live]',
+    'output',
+    'pre',
+  ].join(', ');
+  return await page.locator(selectors).evaluateAll((nodes) => {
+    const seen = new Set();
+    const chunks = [];
+    for (const node of nodes.slice(0, 160)) {
+      const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      const attrs = [];
+      for (const name of ['id', 'class', 'data-testid', 'role', 'aria-label']) {
+        const value = node.getAttribute && node.getAttribute(name);
+        if (value) attrs.push(`${name}=${value}`);
+      }
+      chunks.push(`${node.tagName ? node.tagName.toLowerCase() : 'node'}${attrs.length ? ` [${attrs.join(' ')}]` : ''}: ${text}`);
+    }
+    return chunks.join('\n');
+  }).then((text) => truncate(text, 6000)).catch(() => '');
+}
+
+function collectNumericCandidates(text) {
+  if (!text) return [];
+  const pattern = /(?:score|metric|map|ndcg|recall|precision|success|result|elapsed|latency|ms|seconds?)\D{0,80}[-+]?\d+(?:\.\d+)?|[-+]?\d+\.\d+\D{0,80}(?:score|metric|map|ndcg|recall|precision|success|result|elapsed|latency|ms|seconds?)/gi;
+  const matches = [];
+  const seen = new Set();
+  let match;
+  while ((match = pattern.exec(text)) && matches.length < 40) {
+    const value = match[0].replace(/\s+/g, ' ').trim();
+    if (!seen.has(value)) {
+      seen.add(value);
+      matches.push(value.slice(0, 220));
+    }
+  }
+  return matches;
 }
 
 async function run() {
@@ -112,14 +231,17 @@ async function run() {
           break;
         }
         case 'click': {
-          if (step.selector) {
+          if (Number.isInteger(step.index)) {
+            await page
+              .locator('button, a, input, textarea, select, [role="button"], [role="link"], [role="tab"], [role="menuitem"]')
+              .nth(step.index)
+              .click({ timeout: step.timeout ?? 15000 });
+          } else if (step.selector) {
             await page.locator(step.selector).first().click({ timeout: step.timeout ?? 15000 });
           } else if (step.role && step.name) {
             await page.getByRole(step.role, { name: step.name }).click({ timeout: step.timeout ?? 15000 });
           } else if (step.text) {
-            await page.getByText(step.text, { exact: !!step.exact }).first().click({
-              timeout: step.timeout ?? 15000,
-            });
+            await clickByText(page, step);
           } else {
             throw new Error('click requires selector, role+name, or text');
           }
@@ -161,8 +283,14 @@ async function run() {
           const locator = step.selector
             ? page.locator(step.selector)
             : page.getByText(step.text, { exact: !!step.exact });
-          await locator.first().waitFor({ state: 'visible', timeout: step.timeout ?? 30000 });
+          const matched = locator.first();
+          await matched.waitFor({ state: 'visible', timeout: step.timeout ?? 30000 });
           evidence.checks[`wait_for_text:${step.text || step.selector}`] = true;
+          evidence.checks[`wait_for_text:${step.text || step.selector}:matched_text`] = truncate(
+            (await matched.innerText().catch(() => '')).replace(/\s+/g, ' ').trim(),
+            1200
+          );
+          await captureState(page);
           break;
         }
         case 'element_exists': {

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import urlopen
 
 from bench.web_eval.schemas import AppProfile
@@ -23,10 +25,19 @@ def resolve_app_profile(
         return AppProfile(base_url=base_url.rstrip("/"))
 
     if profile_data:
-        return _profile_from_mapping(project_path, profile_data)
+        profile = _profile_from_mapping(project_path, profile_data)
+        if not no_start and profile.start_command and not _profile_start_looks_runnable(project_path, profile):
+            detected = _detect_profile(project_path)
+            if detected:
+                return _avoid_occupied_port(_merge_profile_with_detection(profile, detected))
+        if not no_start and profile.start_command:
+            return _avoid_occupied_port(profile)
+        return profile
 
     detected = _detect_profile(project_path)
     if detected:
+        if not no_start and detected.start_command:
+            return _avoid_occupied_port(detected)
         return detected
 
     raise ValueError(
@@ -107,6 +118,114 @@ def _detect_profile(project_path: Path) -> AppProfile | None:
     return None
 
 
+def _profile_start_looks_runnable(project_path: Path, profile: AppProfile) -> bool:
+    if not profile.start_command:
+        return True
+    cwd = _profile_cwd(project_path, profile)
+    exe = profile.start_command[0]
+    if exe in {"npm", "pnpm", "yarn"}:
+        return (cwd / "package.json").is_file()
+    if exe in {"python", "python3"} and len(profile.start_command) >= 2:
+        return (cwd / profile.start_command[1]).is_file()
+    if exe == "node" and len(profile.start_command) >= 2:
+        return (cwd / profile.start_command[1]).is_file()
+    return cwd.exists()
+
+
+def _merge_profile_with_detection(configured: AppProfile, detected: AppProfile) -> AppProfile:
+    base_url = configured.base_url or detected.base_url
+    ready_url = configured.ready_url or _same_url_with_path(base_url, "/")
+    env = dict(detected.env)
+    env.update(configured.env)
+    configured_port = _url_port(base_url)
+    if configured_port:
+        env.setdefault("PORT", configured_port)
+        if "FRONTEND_PORT" in detected.env:
+            env.setdefault("FRONTEND_PORT", configured_port)
+    return AppProfile(
+        base_url=base_url,
+        start_command=detected.start_command,
+        cwd=detected.cwd,
+        env=env,
+        ready_url=ready_url,
+        ready_timeout_seconds=max(configured.ready_timeout_seconds, detected.ready_timeout_seconds),
+    )
+
+
+def _avoid_occupied_port(profile: AppProfile) -> AppProfile:
+    host = _url_host(profile.base_url)
+    port = _url_port(profile.base_url)
+    if not host or not port or not _is_local_host(host) or not _port_in_use(host, int(port)):
+        return profile
+    replacement = str(_find_free_port(host))
+    env = dict(profile.env)
+    for key in ("PORT", "FRONTEND_PORT"):
+        if key in env or key == "PORT":
+            env[key] = replacement
+    return AppProfile(
+        base_url=_replace_url_port(profile.base_url, replacement),
+        start_command=profile.start_command,
+        cwd=profile.cwd,
+        env=env,
+        ready_url=_replace_url_port(profile.ready_url, replacement) if profile.ready_url else None,
+        ready_timeout_seconds=profile.ready_timeout_seconds,
+    )
+
+
+def _profile_cwd(project_path: Path, profile: AppProfile) -> Path:
+    if not profile.cwd:
+        return project_path
+    cwd = Path(profile.cwd)
+    return cwd if cwd.is_absolute() else project_path / cwd
+
+
+def _same_url_with_path(url: str, path: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def _url_host(url: str) -> str | None:
+    return urlsplit(url).hostname
+
+
+def _url_port(url: str) -> str | None:
+    parsed = urlsplit(url)
+    if parsed.port:
+        return str(parsed.port)
+    if parsed.scheme == "http":
+        return "80"
+    if parsed.scheme == "https":
+        return "443"
+    return None
+
+
+def _replace_url_port(url: str, port: str) -> str:
+    parsed = urlsplit(url)
+    host = parsed.hostname or "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path or "", parsed.query, parsed.fragment))
+
+
+def _is_local_host(host: str) -> bool:
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _port_in_use(host: str, port: int) -> bool:
+    family = socket.AF_INET6 if host == "::1" else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex((host, port)) == 0
+
+
+def _find_free_port(host: str) -> int:
+    family = socket.AF_INET6 if host == "::1" else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
+
+
 class AppServer:
     def __init__(self, profile: AppProfile, project_path: Path):
         self.profile = profile
@@ -116,11 +235,7 @@ class AppServer:
     def start(self) -> None:
         if not self.profile.start_command:
             return
-        if self.profile.cwd:
-            cwd_path = Path(self.profile.cwd)
-            cwd = cwd_path if cwd_path.is_absolute() else self.project_path / cwd_path
-        else:
-            cwd = self.project_path
+        cwd = _profile_cwd(self.project_path, self.profile)
         env = os.environ.copy()
         env.update(self.profile.env)
         self.process = subprocess.Popen(
@@ -182,6 +297,12 @@ def _wait_for_url(
         try:
             with urlopen(url, timeout=3) as response:
                 if response.status < 500:
+                    time.sleep(0.25)
+                    exit_detail = _process_exit_detail(process)
+                    if exit_detail:
+                        raise RuntimeError(
+                            f"App process exited while checking readiness at {url}. {exit_detail}"
+                        )
                     return
         except URLError as exc:
             last_error = str(exc)

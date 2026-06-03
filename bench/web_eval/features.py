@@ -86,3 +86,13 @@ def _parse_feature(item: Any) -> FeatureCheck:
         acceptance=str(acceptance),
         steps=steps,
     )
+
+
+def write_features(path: Path, features: list[FeatureCheck], app: dict[str, Any] | None = None) -> None:
+    data: dict[str, Any] = {"features": [feature.to_dict() for feature in features]}
+    if app:
+        data["app"] = app
+    if path.suffix in {".yaml", ".yml"}:
+        path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    else:
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
