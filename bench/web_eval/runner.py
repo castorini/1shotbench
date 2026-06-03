@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from bench.config import ROOT_DIR, load_project_env
 from bench.web_eval.features import load_features_file, write_features
@@ -132,8 +133,45 @@ class WebEvalRunner:
         server = AppServer(profile, project_path)
         load_project_env()
         try:
+            startup_error: str | None = None
             if not options.no_start and profile.start_command:
-                server.start()
+                try:
+                    server.start()
+                except Exception as exc:
+                    startup_error = str(exc)
+
+            if startup_error:
+                evidence_by_feature, judgments = _startup_failure_results(features, startup_error)
+                notes = _build_summary_notes(setup_results, startup_error=startup_error)
+                summary = self._build_summary(
+                    eval_id=eval_id,
+                    options=options,
+                    project_path=project_path,
+                    features_path=features_path,
+                    profile=profile,
+                    judge=judge,
+                    judgments=judgments,
+                    started_at=started_at,
+                    notes=notes,
+                )
+                metadata = self._run_metadata(
+                    project_path=project_path,
+                    features_path=features_path,
+                    generated_features=generated_features,
+                    options=options,
+                    profile=profile,
+                    planned_setup_commands=planned_setup_commands,
+                    startup_error=startup_error,
+                )
+                self._write_run_artifacts(
+                    output_dir=output_dir,
+                    summary=summary,
+                    evidence_by_feature=evidence_by_feature,
+                    judgments=judgments,
+                    metadata=metadata,
+                )
+                return summary
+
             evidence_by_feature: dict[str, EvidencePacket] = {}
             judgments = []
             for feature in features:
@@ -183,51 +221,114 @@ class WebEvalRunner:
                     )
                 judgments.append(judgment)
 
-            passed, failed, uncertain, pct = compute_correctness(judgments)
-            ended_at = _now_iso()
-            failed_setup = [result for result in setup_results if result.status == "failed"]
-            notes = None
-            if failed_setup:
-                notes = f"{len(failed_setup)} setup command(s) failed; see setup.json."
-            summary = WebEvalSummary(
+            notes = _build_summary_notes(setup_results)
+            summary = self._build_summary(
                 eval_id=eval_id,
-                label=options.label,
-                started_at=started_at,
-                ended_at=ended_at,
-                project_path=str(project_path),
-                features_path=str(features_path),
-                prd_path=str(options.prd_path) if options.prd_path else None,
-                base_url=profile.base_url,
-                total_features=len(features),
-                passed=passed,
-                failed=failed,
-                uncertain=uncertain,
-                correctness_pct=pct,
+                options=options,
+                project_path=project_path,
+                features_path=features_path,
+                profile=profile,
+                judge=judge,
                 judgments=judgments,
-                git_commit=_git_commit(self.root_dir),
-                judge_model=None if options.dry_run else judge.model,
+                started_at=started_at,
                 notes=notes,
             )
-            write_artifacts(output_dir, summary=summary, evidence_by_feature=evidence_by_feature, judgments=judgments)
-            metadata = {
-                "options": {
-                    "project_path": str(project_path),
-                    "features_path": str(features_path),
-                    "features_generated": generated_features,
-                    "prd_path": str(options.prd_path) if options.prd_path else None,
-                    "base_url": profile.base_url,
-                    "no_start": options.no_start,
-                    "dry_run": options.dry_run,
-                    "setup_mode": options.setup_mode,
-                    "agentic_evidence": options.agentic_evidence,
-                    "planned_setup_commands": [command.to_dict() for command in planned_setup_commands],
-                },
-                "app_profile": profile.to_dict(),
-            }
-            (output_dir / "run.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+            metadata = self._run_metadata(
+                project_path=project_path,
+                features_path=features_path,
+                generated_features=generated_features,
+                options=options,
+                profile=profile,
+                planned_setup_commands=planned_setup_commands,
+                startup_error=None,
+            )
+            self._write_run_artifacts(
+                output_dir=output_dir,
+                summary=summary,
+                evidence_by_feature=evidence_by_feature,
+                judgments=judgments,
+                metadata=metadata,
+            )
             return summary
         finally:
             server.stop()
+
+    def _build_summary(
+        self,
+        *,
+        eval_id: str,
+        options: WebEvalOptions,
+        project_path: Path,
+        features_path: Path,
+        profile,
+        judge: JudgeClient,
+        judgments: list[FeatureJudgment],
+        started_at: str,
+        notes: str | None,
+    ) -> WebEvalSummary:
+        passed, failed, uncertain, pct = compute_correctness(judgments)
+        return WebEvalSummary(
+            eval_id=eval_id,
+            label=options.label,
+            started_at=started_at,
+            ended_at=_now_iso(),
+            project_path=str(project_path),
+            features_path=str(features_path),
+            prd_path=str(options.prd_path) if options.prd_path else None,
+            base_url=profile.base_url,
+            total_features=len(judgments),
+            passed=passed,
+            failed=failed,
+            uncertain=uncertain,
+            correctness_pct=pct,
+            judgments=judgments,
+            git_commit=_git_commit(self.root_dir),
+            judge_model=None if options.dry_run else judge.model,
+            notes=notes,
+        )
+
+    def _run_metadata(
+        self,
+        *,
+        project_path: Path,
+        features_path: Path,
+        generated_features: bool,
+        options: WebEvalOptions,
+        profile,
+        planned_setup_commands,
+        startup_error: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "options": {
+                "project_path": str(project_path),
+                "features_path": str(features_path),
+                "features_generated": generated_features,
+                "prd_path": str(options.prd_path) if options.prd_path else None,
+                "base_url": profile.base_url,
+                "no_start": options.no_start,
+                "dry_run": options.dry_run,
+                "setup_mode": options.setup_mode,
+                "agentic_evidence": options.agentic_evidence,
+                "planned_setup_commands": [command.to_dict() for command in planned_setup_commands],
+            },
+            "app_profile": profile.to_dict(),
+            "app_start": {
+                "status": "failed" if startup_error else "ready",
+                "error": startup_error,
+            },
+        }
+
+    def _write_run_artifacts(
+        self,
+        *,
+        output_dir: Path,
+        summary: WebEvalSummary,
+        evidence_by_feature: dict[str, EvidencePacket],
+        judgments: list[FeatureJudgment],
+        metadata: dict[str, Any],
+    ) -> None:
+        write_artifacts(output_dir, summary=summary, evidence_by_feature=evidence_by_feature, judgments=judgments)
+        (output_dir / "run.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
     def _collect_evidence(
         self,
@@ -313,3 +414,48 @@ def _merge_evidence(scripted: EvidencePacket, planned: EvidencePacket, planned_s
 def _make_eval_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return f"{stamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _startup_failure_results(
+    features: list[FeatureCheck],
+    startup_error: str,
+) -> tuple[dict[str, EvidencePacket], list[FeatureJudgment]]:
+    evidence_by_feature: dict[str, EvidencePacket] = {}
+    judgments: list[FeatureJudgment] = []
+    reason = f"Application failed to start or become ready: {startup_error}"
+    for feature in features:
+        evidence_by_feature[feature.id] = EvidencePacket(
+            feature_id=feature.id,
+            action_log=["app_start_failed"],
+            checks={
+                "app_startup_failed": True,
+                "startup_error": startup_error,
+            },
+            error=startup_error,
+        )
+        judgments.append(
+            FeatureJudgment(
+                feature_id=feature.id,
+                verdict="fail",
+                confidence=1.0,
+                reason=reason,
+                evidence_used=["startup_error"],
+            )
+        )
+    return evidence_by_feature, judgments
+
+
+def _build_summary_notes(
+    setup_results,
+    *,
+    startup_error: str | None = None,
+) -> str | None:
+    notes: list[str] = []
+    failed_setup = [result for result in setup_results if result.status == "failed"]
+    if failed_setup:
+        notes.append(f"{len(failed_setup)} setup command(s) failed; see setup.json.")
+    if startup_error:
+        notes.append(f"Application startup/readiness failed; all features were marked fail. {startup_error}")
+    if not notes:
+        return None
+    return " ".join(notes)

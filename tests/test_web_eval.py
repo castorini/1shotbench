@@ -5,12 +5,14 @@ import socket
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from bench.web_eval.features import load_features, write_features
 from bench.web_eval.judge import JudgeClient, compute_correctness, _features_from_json, _parse_judge_json
 from bench.web_eval.prd import load_prd_context
 from bench.web_eval.profile import resolve_app_profile
 from bench.web_eval.report import render_markdown
+from bench.web_eval.runner import WebEvalOptions, WebEvalRunner
 from bench.web_eval.setup import PlannedSetupCommand, collect_setup_context, discover_readme_setup_commands, run_project_setup
 from bench.web_eval.schemas import EvidencePacket, FeatureCheck, FeatureJudgment, WebEvalSummary
 
@@ -379,6 +381,71 @@ class WebEvalSchemaTests(unittest.TestCase):
         md = render_markdown(summary, Path("/tmp/evals/test-id"))
         self.assertIn("100.0%", md)
         self.assertIn("f1", md)
+
+    def test_runner_records_startup_failure_as_zero_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            (project / "package.json").write_text(
+                json.dumps({"scripts": {"start": "node server.js"}}),
+                encoding="utf-8",
+            )
+            (project / "server.js").write_text("console.error('boom')\n", encoding="utf-8")
+            features_path = root / "features.yaml"
+            write_features(
+                features_path,
+                [
+                    FeatureCheck("search", "Search", "Users can search", "Search returns results"),
+                    FeatureCheck("filters", "Filters", "Users can filter", "Filtering narrows results"),
+                ],
+            )
+
+            runner = WebEvalRunner(root_dir=root)
+            options = WebEvalOptions(
+                project_path=project,
+                features_path=features_path,
+                label="startup-failure",
+                eval_id="eval-startup-failure",
+                dry_run=True,
+                agentic_evidence=False,
+            )
+
+            startup_error = (
+                "App process failed before becoming ready at http://127.0.0.1:3000/. "
+                "start command exited with code 1:\n"
+                "npm ERR! Missing script: \"start\""
+            )
+
+            with mock.patch.object(WebEvalRunner, "preflight", return_value=[]), \
+                mock.patch("bench.web_eval.runner.EVALS_DIR", root / "evals"), \
+                mock.patch("bench.web_eval.runner.collect_setup_context", return_value={}), \
+                mock.patch("bench.web_eval.runner.run_project_setup", return_value=[]), \
+                mock.patch("bench.web_eval.runner.load_project_env", return_value={}), \
+                mock.patch("bench.web_eval.runner.JudgeClient.plan_setup_commands", return_value=[]), \
+                mock.patch("bench.web_eval.runner.AppServer.start", side_effect=RuntimeError(startup_error)):
+                summary = runner.run(options)
+
+            self.assertEqual(summary.correctness_pct, 0.0)
+            self.assertEqual(summary.failed, 2)
+            self.assertEqual(summary.passed, 0)
+            self.assertTrue(all(j.verdict == "fail" for j in summary.judgments))
+            self.assertIn("Application startup/readiness failed", summary.notes or "")
+
+            output_dir = root / "evals" / "eval-startup-failure"
+            run_artifact = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_artifact["app_start"]["status"], "failed")
+            self.assertEqual(run_artifact["app_start"]["error"], startup_error)
+
+            summary_artifact = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary_artifact["correctness_pct"], 0.0)
+
+            for feature_id in ("search", "filters"):
+                evidence = json.loads((output_dir / "evidence" / f"{feature_id}.json").read_text(encoding="utf-8"))
+                judgment = json.loads((output_dir / "judgments" / f"{feature_id}.json").read_text(encoding="utf-8"))
+                self.assertTrue(evidence["checks"]["app_startup_failed"])
+                self.assertEqual(evidence["error"], startup_error)
+                self.assertEqual(judgment["verdict"], "fail")
 
 
 if __name__ == "__main__":
