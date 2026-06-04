@@ -223,6 +223,10 @@
           <section class="stack">
             <h2>Run Setup</h2>
             <div>
+              <label>Project</label>
+              <select id="project"></select>
+            </div>
+            <div>
               <label>Task File</label>
               <div class="task-row">
                 <select id="taskFile"></select>
@@ -313,6 +317,7 @@
       const modelTimers = {};
       const historyDiv = document.getElementById("history");
       const liveHint = document.getElementById("liveHint");
+      const projectSelect = document.getElementById("project");
       const taskFileSelect = document.getElementById("taskFile");
       let currentSummary = null;
 
@@ -363,8 +368,20 @@
         if (el) el.textContent = "";
       }
 
+      function currentProject() {
+        return projectSelect.value;
+      }
+
+      async function loadProjects() {
+        const res = await fetch("/api/projects");
+        const projects = await res.json();
+        projectSelect.innerHTML = projects.map((p) =>
+          `<option value="${p.key}">${p.key}</option>`
+        ).join("");
+      }
+
       async function loadModels() {
-        const res = await fetch("/api/models");
+        const res = await fetch(`/api/projects/${encodeURIComponent(currentProject())}/models`);
         const models = await res.json();
         modelsDiv.innerHTML = models.map((m) =>
           `<label class="model-option"><input type="checkbox" value="${m.key}" checked /><strong>${m.key}</strong><span>${m.provider || "default"}/${m.model}</span></label>`
@@ -372,7 +389,7 @@
       }
 
       async function loadTaskFiles() {
-        const res = await fetch("/api/task-files");
+        const res = await fetch(`/api/projects/${encodeURIComponent(currentProject())}/task-files`);
         const files = await res.json();
         taskFileSelect.innerHTML = files.map((f) =>
           `<option value="${f.name}">${f.name}</option>`
@@ -383,7 +400,7 @@
       }
 
       async function loadHistory() {
-        const res = await fetch("/api/history");
+        const res = await fetch(`/api/projects/${encodeURIComponent(currentProject())}/history`);
         const rows = await res.json();
         historyDiv.innerHTML = rows.map((r) =>
           `<div class="history-item" data-run-id="${r.run_id}">${r.run_id} | ${r.label} | ${r.mode} | ${r.duration_ms}ms | ${r.started_at}</div>`
@@ -487,6 +504,11 @@
       };
 
       document.getElementById("refreshHistory").onclick = loadHistory;
+      projectSelect.onchange = async () => {
+        await loadModels();
+        await loadTaskFiles();
+        await loadHistory();
+      };
 
       document.getElementById("start").onclick = async () => {
         liveDiv.innerHTML = "";
@@ -496,6 +518,7 @@
         Object.keys(modelCards).forEach((key) => delete modelCards[key]);
         liveHint.textContent = "Preparing workspaces";
         const payload = {
+          project: currentProject(),
           prompt: document.getElementById("prompt").value,
           models: selectedModels(),
           mode: document.getElementById("mode").value,
@@ -548,9 +571,14 @@
         };
       };
 
-      loadModels();
-      loadTaskFiles();
-      loadHistory();
+      async function bootstrap() {
+        await loadProjects();
+        await loadModels();
+        await loadTaskFiles();
+        await loadHistory();
+      }
+
+      bootstrap();
     </script>
   </body>
 </html>

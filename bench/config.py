@@ -4,23 +4,20 @@ import os
 import tomllib
 from pathlib import Path
 
+from bench.layout import (
+    PROJECTS_DIR,
+    ROOT_DIR,
+    TASK_FILE_PATTERNS,
+    discover_projects,
+    discover_shared_task_files,
+    project_runs_dir,
+    resolve_project_dir,
+)
+from bench.model_catalog import load_model_catalog
 from bench.schemas import WorkspaceConfig
 
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_TASK_DIR_NAME = "anserini-frontend"
-RUNS_DIR = ROOT_DIR / "runs"
 WORKSPACE_CONFIG_NAME = "bench.toml"
-SHARED_TASK_GLOBS = ("PRD*.md", "TASK*.md", "task*.md", "prompt*.md")
-
-
-def resolve_workspaces_dir(task_dir: str | Path | None = None) -> Path:
-    selected = task_dir or os.environ.get("PI_BENCH_TASK_DIR") or DEFAULT_TASK_DIR_NAME
-    path = Path(selected)
-    return path if path.is_absolute() else ROOT_DIR / path
-
-
-WORKSPACES_DIR = resolve_workspaces_dir()
 
 
 def _as_str_list(value: object) -> list[str]:
@@ -33,13 +30,19 @@ def _as_str_list(value: object) -> list[str]:
     return []
 
 
-def load_workspace_configs(task_dir: str | Path | None = None) -> dict[str, WorkspaceConfig]:
-    configs: dict[str, WorkspaceConfig] = {}
-    workspaces_dir = resolve_workspaces_dir(task_dir)
-    if not workspaces_dir.exists():
+def list_projects() -> list[dict[str, str]]:
+    return [{"key": path.name, "path": str(path.resolve())} for path in discover_projects()]
+
+
+def load_workspace_configs(project: str | Path | None = None) -> dict[str, WorkspaceConfig]:
+    configs = load_model_catalog()
+    project_dir = resolve_project_dir(project)
+    if not project_dir.exists():
         return configs
 
-    for workspace in sorted(workspaces_dir.iterdir()):
+    # Temporary compatibility: if a project still has legacy top-level workspaces,
+    # use those bench.toml files to override the catalog defaults.
+    for workspace in sorted(project_dir.iterdir()):
         if not workspace.is_dir() or not workspace.name.endswith("-workspace"):
             continue
         config_path = workspace / WORKSPACE_CONFIG_NAME
@@ -51,7 +54,7 @@ def load_workspace_configs(task_dir: str | Path | None = None) -> dict[str, Work
         configs[key] = WorkspaceConfig(
             key=key,
             name=parsed.get("name", workspace.name),
-            path=str(workspace),
+            path="",
             model=parsed.get("model", ""),
             provider=parsed.get("provider"),
             thinking=parsed.get("thinking"),
@@ -61,16 +64,6 @@ def load_workspace_configs(task_dir: str | Path | None = None) -> dict[str, Work
             required_skills=_as_str_list(parsed.get("required_skills")),
         )
     return configs
-
-
-def discover_shared_task_files(task_dir: str | Path | None = None) -> list[Path]:
-    files: dict[str, Path] = {}
-    workspaces_dir = resolve_workspaces_dir(task_dir)
-    for pattern in SHARED_TASK_GLOBS:
-        for path in workspaces_dir.glob(pattern):
-            if path.is_file():
-                files[path.name] = path
-    return [files[name] for name in sorted(files)]
 
 
 def load_project_env() -> dict[str, str]:
@@ -88,3 +81,17 @@ def load_project_env() -> dict[str, str]:
         if key:
             env[key] = value
     return env
+
+
+__all__ = [
+    "PROJECTS_DIR",
+    "ROOT_DIR",
+    "TASK_FILE_PATTERNS",
+    "WORKSPACE_CONFIG_NAME",
+    "discover_shared_task_files",
+    "list_projects",
+    "load_project_env",
+    "load_workspace_configs",
+    "project_runs_dir",
+    "resolve_project_dir",
+]

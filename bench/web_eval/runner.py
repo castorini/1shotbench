@@ -78,12 +78,12 @@ class WebEvalRunner:
         if errors:
             raise RuntimeError("\n".join(errors))
 
-        project_path = options.project_path.resolve()
+        project_path = resolve_eval_workspace(options.project_path.resolve())
         if not project_path.exists():
             raise FileNotFoundError(f"Project path not found: {project_path}")
 
         eval_id = options.eval_id or _make_eval_id()
-        output_dir = EVALS_DIR / eval_id
+        output_dir = resolve_eval_output_dir(project_path, eval_id)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         prd_context = load_prd_context(options.prd_path)
@@ -414,6 +414,19 @@ def _merge_evidence(scripted: EvidencePacket, planned: EvidencePacket, planned_s
 def _make_eval_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     return f"{stamp}-{uuid.uuid4().hex[:8]}"
+
+
+def resolve_eval_workspace(path: Path) -> Path:
+    if (path / "workspace").is_dir():
+        return path / "workspace"
+    return path
+
+
+def resolve_eval_output_dir(path: Path, eval_id: str) -> Path:
+    workspace_path = resolve_eval_workspace(path)
+    if workspace_path.name == "workspace":
+        return workspace_path.parent / "evals" / eval_id
+    return EVALS_DIR / eval_id
 
 
 def _startup_failure_results(

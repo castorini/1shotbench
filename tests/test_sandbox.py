@@ -45,6 +45,29 @@ class SandboxPathTests(unittest.TestCase):
             self.assertEqual(denied, [beta.resolve(), (root / ".codex-private").resolve()])
             self.assertTrue((root / ".codex-private").exists())
 
+    def test_denied_paths_ignore_empty_template_workspace_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "projects" / "demo" / "runs" / "run-1"
+            alpha = run_dir / "alpha" / "workspace"
+            beta = run_dir / "beta" / "workspace"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            workspaces = {
+                "alpha": WorkspaceConfig("alpha", "Alpha", str(alpha), "model-a"),
+                "beta": WorkspaceConfig("beta", "Beta", str(beta), "model-b"),
+                "template-only": WorkspaceConfig("template-only", "Template Only", "", "model-c"),
+            }
+
+            denied = denied_workspace_paths(
+                root_dir=root,
+                workspaces=workspaces,
+                workspace=workspaces["alpha"],
+            )
+
+            self.assertEqual(denied, [beta.resolve(), (root / ".codex-private").resolve()])
+            self.assertNotIn(root.resolve(), denied)
+
 
 class SandboxWrapTests(unittest.TestCase):
     def test_wrap_with_sandbox_exec_writes_profile(self) -> None:

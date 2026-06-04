@@ -18,3 +18,11 @@ node_modules/
 **/run.*.txt
 **/eval.*.txt
 **/.cache/
+
+# paper workspace
+paper/
+
+# artifacts
+*.jar
+*.zip
+*.gz

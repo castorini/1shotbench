@@ -1,0 +1,7 @@
+{
+  "run_id": "20260603-legacy-current-state",
+  "label": "legacy-current-state",
+  "project": "anserini-evaluator",
+  "imported": true,
+  "notes": "Imported the previously root-level evaluator workspaces into the canonical projects/<project>/runs layout on 2026-06-03."
+}

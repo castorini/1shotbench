@@ -53,10 +53,13 @@ class RunnerLoggingTests(unittest.IsolatedAsyncioTestCase):
                     provider="fake-provider",
                 )
                 runner = BenchmarkRunner(root, {"fake": workspace})
-                runner._apply_workspace_sandbox = lambda command, workspace, model_dir: command
+                runner._apply_workspace_sandbox = (
+                    lambda command, workspaces, workspace, model_dir: command
+                )
 
                 result = await runner._run_single(
                     run_dir=run_dir,
+                    selected_workspaces={"fake": workspace},
                     workspace=workspace,
                     prompt="hello",
                     prompt_hash="hash",
@@ -121,10 +124,13 @@ class RunnerLoggingTests(unittest.IsolatedAsyncioTestCase):
                     provider="fake-provider",
                 )
                 runner = BenchmarkRunner(root, {"fake": workspace})
-                runner._apply_workspace_sandbox = lambda command, workspace, model_dir: command
+                runner._apply_workspace_sandbox = (
+                    lambda command, workspaces, workspace, model_dir: command
+                )
 
                 result = await runner._run_single(
                     run_dir=run_dir,
+                    selected_workspaces={"fake": workspace},
                     workspace=workspace,
                     prompt="hello",
                     prompt_hash="hash",

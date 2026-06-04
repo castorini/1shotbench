@@ -1,0 +1,4 @@
+(version 1)
+(allow default)
+(deny file-read* (subpath "/Users/n/Desktop/code/pi-bench/.codex-private"))
+(deny file-write* (subpath "/Users/n/Desktop/code/pi-bench/.codex-private"))

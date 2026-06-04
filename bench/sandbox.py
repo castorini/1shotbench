@@ -73,11 +73,14 @@ def denied_workspace_paths(
     workspace_path = Path(workspace.path).resolve()
     private_path = (root_dir / ".codex-private").resolve()
     private_path.mkdir(parents=True, exist_ok=True)
-    denied_paths = [
-        Path(other.path).resolve()
-        for other in workspaces.values()
-        if Path(other.path).resolve() != workspace_path
-    ]
+    denied_paths: list[Path] = []
+    for other in workspaces.values():
+        if not other.path:
+            continue
+        other_path = Path(other.path).resolve()
+        if other_path == workspace_path:
+            continue
+        denied_paths.append(other_path)
     denied_paths.append(private_path)
     return denied_paths
 

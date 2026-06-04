@@ -1,78 +1,30 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
+from datetime import datetime
+import os
 from pathlib import Path
+
+from bench.config import discover_shared_task_files, resolve_project_dir
+from bench.layout import implementation_workspace_dir, project_runs_dir
+from bench.model_catalog import MODEL_SPECS
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_TASK_DIR = "anserini-frontend"
-TASK_FILE_PATTERNS = ("PRD*.md", "TASK*.md", "task*.md", "prompt*.md")
-REQUIRED_SKILLS = [
-    "install-anserini-fatjar",
-    "anserini-cli",
-    "anserini-reproduction",
-]
-TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"]
+DEFAULT_PROJECT = "anserini-frontend"
 
 
-@dataclass(frozen=True)
-class WorkspaceSpec:
-    key: str
-    name: str
-    provider: str
-    model: str
-    thinking: str = "high"
-    tools: list[str] = field(default_factory=lambda: TOOLS.copy())
-    required_skills: list[str] = field(default_factory=lambda: REQUIRED_SKILLS.copy())
-
-    @property
-    def directory_name(self) -> str:
-        return f"{self.key}-workspace"
-
-    def to_toml(self) -> str:
-        return "\n".join(
-            [
-                f'name = "{self.name}"',
-                f'provider = "{self.provider}"',
-                f'model = "{self.model}"',
-                f'thinking = "{self.thinking}"',
-                f"tools = {_toml_list(self.tools)}",
-                f"required_skills = {_toml_list(self.required_skills)}",
-                "",
-            ]
-        )
+def default_run_id() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-WORKSPACES = [
-    WorkspaceSpec("gpt", "GPT workspace", "openai-codex", "gpt-5.5"),
-    WorkspaceSpec("claude", "Claude workspace", "anthropic", "claude-sonnet-4-6"),
-    WorkspaceSpec("gemini", "Gemini workspace", "google", "gemini-3.1-pro-preview"),
-    WorkspaceSpec("glm", "GLM workspace", "zai", "glm-5.1"),
-    WorkspaceSpec("kimi", "Kimi workspace", "moonshotai", "kimi-k2.6"),
-    WorkspaceSpec("minimax", "MiniMax workspace", "minimax", "MiniMax-M2.7"),
-]
+def create_run_scaffold(project_dir: Path, run_id: str, *, force: bool) -> None:
+    run_dir = project_runs_dir(project_dir) / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    task_files = discover_shared_task_files(project_dir)
 
-
-def _toml_list(values: list[str]) -> str:
-    return "[" + ", ".join(f'"{value}"' for value in values) + "]"
-
-
-def discover_task_files(task_dir: Path) -> list[Path]:
-    files: dict[str, Path] = {}
-    for pattern in TASK_FILE_PATTERNS:
-        for path in task_dir.glob(pattern):
-            if path.is_file():
-                files[path.name] = path
-    return [files[name] for name in sorted(files)]
-
-
-def create_workspaces(task_dir: Path, force: bool) -> None:
-    task_dir.mkdir(parents=True, exist_ok=True)
-    task_files = discover_task_files(task_dir)
-
-    for spec in WORKSPACES:
-        workspace_dir = task_dir / spec.directory_name
+    for spec in MODEL_SPECS:
+        workspace_dir = implementation_workspace_dir(run_dir, spec.key)
         workspace_dir.mkdir(parents=True, exist_ok=True)
 
         config_path = workspace_dir / "bench.toml"
@@ -84,7 +36,7 @@ def create_workspaces(task_dir: Path, force: bool) -> None:
 
         for task_file in task_files:
             link_path = workspace_dir / task_file.name
-            target = Path("..") / task_file.name
+            target = Path(os.path.relpath(task_file, workspace_dir))
             if link_path.is_symlink():
                 if link_path.readlink() != target:
                     link_path.unlink()
@@ -100,13 +52,18 @@ def create_workspaces(task_dir: Path, force: bool) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Create Pi Bench model workspace folders for a task."
+        description="Create canonical Pi Bench implementation workspaces for a project run."
     )
     parser.add_argument(
-        "task_dir",
+        "project",
         nargs="?",
-        default=DEFAULT_TASK_DIR,
-        help=f"Task workspace directory to create. Default: {DEFAULT_TASK_DIR}",
+        default=DEFAULT_PROJECT,
+        help=f"Project directory or key. Default: {DEFAULT_PROJECT}",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=default_run_id(),
+        help="Run identifier under projects/<project>/runs/. Default: current local timestamp.",
     )
     parser.add_argument(
         "--force",
@@ -118,10 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    task_dir = Path(args.task_dir)
-    if not task_dir.is_absolute():
-        task_dir = ROOT_DIR / task_dir
-    create_workspaces(task_dir=task_dir, force=args.force)
+    project_dir = resolve_project_dir(args.project)
+    create_run_scaffold(project_dir=project_dir, run_id=args.run_id, force=args.force)
     return 0
 
 

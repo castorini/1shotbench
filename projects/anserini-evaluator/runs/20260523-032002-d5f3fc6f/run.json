@@ -1,0 +1,7 @@
+{
+  "run_id": "20260523-032002-d5f3fc6f",
+  "label": "anserini-evaluator-clean-rerun",
+  "project": "anserini-evaluator",
+  "imported": true,
+  "notes": "Imported from the former benchmark-artifacts/anserini-evaluator-clean-rerun bundle."
+}

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from bench.config import ROOT_DIR
-from bench.web_eval.runner import WebEvalRunner, WebEvalOptions
+from bench.web_eval.runner import WebEvalRunner, WebEvalOptions, resolve_eval_output_dir
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,8 +92,9 @@ def main() -> int:
         print(f"web-eval failed: {exc}", file=sys.stderr)
         return 1
 
+    artifacts_dir = resolve_eval_output_dir(project, summary.eval_id)
     print(json.dumps(summary.to_dict(), indent=2))
-    print(f"\nArtifacts written to: {ROOT_DIR / 'evals' / summary.eval_id}")
+    print(f"\nArtifacts written to: {artifacts_dir}")
     return 0
 
 

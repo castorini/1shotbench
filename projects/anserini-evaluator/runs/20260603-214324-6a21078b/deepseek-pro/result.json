@@ -1,0 +1,43 @@
+{
+  "model_key": "deepseek-pro",
+  "workspace_path": "/Users/n/Desktop/code/pi-bench/projects/anserini-evaluator/runs/20260603-214324-6a21078b/deepseek-pro/workspace",
+  "model_name": "deepseek-v4-pro",
+  "provider": "deepseek",
+  "status": "failed",
+  "exit_code": 1,
+  "started_at": "2026-06-03T21:43:24.710615+00:00",
+  "ended_at": "2026-06-03T21:43:26.917199+00:00",
+  "duration_ms": 2206,
+  "prompt_hash": "17acf21b4b891e906f5aa4bb09fa91626546d85ae2c5ec1a4d405b805e01d594",
+  "stdout_path": "/Users/n/Desktop/code/pi-bench/projects/anserini-evaluator/runs/20260603-214324-6a21078b/deepseek-pro/stdout.log",
+  "stderr_path": "/Users/n/Desktop/code/pi-bench/projects/anserini-evaluator/runs/20260603-214324-6a21078b/deepseek-pro/stderr.log",
+  "result_path": "/Users/n/Desktop/code/pi-bench/projects/anserini-evaluator/runs/20260603-214324-6a21078b/deepseek-pro/result.json",
+  "command": [
+    "pi",
+    "--mode",
+    "json",
+    "--print",
+    "--no-session",
+    "--provider",
+    "deepseek",
+    "--model",
+    "deepseek-v4-pro",
+    "--thinking",
+    "high",
+    "--tools",
+    "read,bash,edit,write,grep,find,ls",
+    "<prompt>"
+  ],
+  "events_path": "/Users/n/Desktop/code/pi-bench/projects/anserini-evaluator/runs/20260603-214324-6a21078b/deepseek-pro/events.jsonl",
+  "attempts": 1,
+  "error": "Non-zero exit code: 1",
+  "metrics": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "reasoning_tokens": 0,
+    "cache_read_tokens": 0,
+    "total_tokens": 0,
+    "cost_usd": 0.0,
+    "requests": 0
+  }
+}

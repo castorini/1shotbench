@@ -16,7 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from bench.config import RUNS_DIR, discover_shared_task_files, load_project_env
+from bench.config import discover_shared_task_files, load_project_env, project_runs_dir
+from bench.layout import implementation_workspace_dir
+from bench.model_catalog import find_model_spec
 from bench.metrics import extract_inline_token_usage
 from bench.sandbox import apply_workspace_sandbox, sandbox_preflight_error
 from bench.schemas import BenchmarkSummary, RunJobResult, TokenMetrics, WorkspaceConfig
@@ -65,9 +67,10 @@ def _git_commit(root: Path) -> str | None:
 
 
 class BenchmarkRunner:
-    def __init__(self, root_dir: Path, workspaces: dict[str, WorkspaceConfig]):
+    def __init__(self, root_dir: Path, workspaces: dict[str, WorkspaceConfig], project_dir: Path | None = None):
         self.root_dir = root_dir
         self.workspaces = workspaces
+        self.project_dir = project_dir.resolve() if project_dir else None
 
     def preflight(self, selected_models: list[str]) -> list[str]:
         errors: list[str] = []
@@ -77,7 +80,7 @@ class BenchmarkRunner:
 
         for model in selected_models:
             workspace = self.workspaces.get(model)
-            if workspace and not Path(workspace.path).exists():
+            if workspace and workspace.path and not Path(workspace.path).exists():
                 errors.append(f"Workspace not found: {workspace.path}")
 
         if not shutil.which("pi"):
@@ -117,26 +120,19 @@ class BenchmarkRunner:
         return False
 
     def sync_shared_task_files(self) -> None:
-        task_files = discover_shared_task_files(self._task_dir())
+        if not self.project_dir:
+            return
+        task_files = discover_shared_task_files(self.project_dir)
         if not task_files:
             return
         for workspace in self.workspaces.values():
-            workspace_path = Path(workspace.path)
-            if not workspace_path.exists():
+            if not workspace.path:
                 continue
-            for task_file in task_files:
-                link_path = workspace_path / task_file.name
-                target = Path("..") / task_file.name
-                if link_path.is_symlink():
-                    if link_path.readlink() != target:
-                        link_path.unlink()
-                        link_path.symlink_to(target)
-                    continue
-                if link_path.exists():
-                    continue
-                link_path.symlink_to(target)
+            self._sync_task_files_into_workspace(Path(workspace.path), task_files)
 
     def _task_dir(self) -> Path | None:
+        if self.project_dir:
+            return self.project_dir
         parents = {
             Path(workspace.path).resolve().parent
             for workspace in self.workspaces.values()
@@ -153,20 +149,23 @@ class BenchmarkRunner:
     ) -> BenchmarkSummary:
         run_started = _now()
         run_id = options.run_id or f"{run_started.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        run_dir = RUNS_DIR / run_id
+        run_base_dir = project_runs_dir(self.project_dir) if self.project_dir else (self.root_dir / "runs")
+        run_dir = run_base_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        self.sync_shared_task_files()
 
         prompt_hash = _sha256(options.prompt)
         prompt_file = run_dir / "prompt.txt"
         prompt_file.write_text(options.prompt, encoding="utf-8")
 
-        selected = [self.workspaces[key] for key in options.selected_models]
+        selected_templates = [self.workspaces[key] for key in options.selected_models]
+        selected = [self._materialize_workspace(run_dir, workspace) for workspace in selected_templates]
+        selected_workspaces = {workspace.key: workspace for workspace in selected}
 
         if options.warmup:
             for workspace in selected:
                 await self._run_single(
                     run_dir=run_dir,
+                    selected_workspaces=selected_workspaces,
                     workspace=workspace,
                     prompt=options.prompt,
                     prompt_hash=prompt_hash,
@@ -181,6 +180,7 @@ class BenchmarkRunner:
             for workspace in selected:
                 result = await self._run_single(
                     run_dir=run_dir,
+                    selected_workspaces=selected_workspaces,
                     workspace=workspace,
                     prompt=options.prompt,
                     prompt_hash=prompt_hash,
@@ -197,6 +197,7 @@ class BenchmarkRunner:
                     self._run_with_semaphore(
                         sem=sem,
                         run_dir=run_dir,
+                        selected_workspaces=selected_workspaces,
                         workspace=workspace,
                         prompt=options.prompt,
                         prompt_hash=prompt_hash,
@@ -233,6 +234,59 @@ class BenchmarkRunner:
         self._write_summary_md(run_dir, summary)
         return summary
 
+    def _materialize_workspace(self, run_dir: Path, template: WorkspaceConfig) -> WorkspaceConfig:
+        if not self.project_dir:
+            return template
+
+        workspace_dir = implementation_workspace_dir(run_dir, template.key)
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        spec = find_model_spec(template.key)
+        toml_text = spec.to_toml() if spec else self._workspace_config_to_toml(template)
+        (workspace_dir / "bench.toml").write_text(toml_text, encoding="utf-8")
+
+        task_files = discover_shared_task_files(self.project_dir)
+        self._sync_task_files_into_workspace(workspace_dir, task_files)
+
+        return WorkspaceConfig(
+            key=template.key,
+            name=template.name,
+            path=str(workspace_dir),
+            model=template.model,
+            provider=template.provider,
+            thinking=template.thinking,
+            system_prompt=template.system_prompt,
+            append_system_prompt=list(template.append_system_prompt),
+            tools=list(template.tools),
+            required_skills=list(template.required_skills),
+        )
+
+    def _sync_task_files_into_workspace(self, workspace_dir: Path, task_files: list[Path]) -> None:
+        for task_file in task_files:
+            link_path = workspace_dir / task_file.name
+            target = Path(os.path.relpath(task_file, workspace_dir))
+            if link_path.is_symlink():
+                if link_path.readlink() != target:
+                    link_path.unlink()
+                    link_path.symlink_to(target)
+                continue
+            if link_path.exists():
+                continue
+            link_path.symlink_to(target)
+
+    def _workspace_config_to_toml(self, config: WorkspaceConfig) -> str:
+        return "\n".join(
+            [
+                f'name = "{config.name}"',
+                f'provider = "{config.provider or ""}"',
+                f'model = "{config.model}"',
+                f'thinking = "{config.thinking or "high"}"',
+                f"tools = [{', '.join(f'\"{value}\"' for value in config.tools)}]",
+                f"required_skills = [{', '.join(f'\"{value}\"' for value in config.required_skills)}]",
+                "",
+            ]
+        )
+
     async def _run_with_semaphore(self, sem: asyncio.Semaphore, **kwargs) -> RunJobResult:
         async with sem:
             return await self._run_single(**kwargs)
@@ -244,6 +298,7 @@ class BenchmarkRunner:
     async def _run_single(
         self,
         run_dir: Path,
+        selected_workspaces: dict[str, WorkspaceConfig],
         workspace: WorkspaceConfig,
         prompt: str,
         prompt_hash: str,
@@ -278,6 +333,7 @@ class BenchmarkRunner:
         env = load_project_env()
         exec_command = self._apply_workspace_sandbox(
             command=command,
+            workspaces=selected_workspaces,
             workspace=workspace,
             model_dir=model_dir,
         )
@@ -537,12 +593,13 @@ class BenchmarkRunner:
     def _apply_workspace_sandbox(
         self,
         command: list[str],
+        workspaces: dict[str, WorkspaceConfig],
         workspace: WorkspaceConfig,
         model_dir: Path,
     ) -> list[str]:
         return apply_workspace_sandbox(
             root_dir=self.root_dir,
-            workspaces=self.workspaces,
+            workspaces=workspaces,
             workspace=workspace,
             model_dir=model_dir,
             command=command,

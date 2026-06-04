@@ -1,0 +1,7 @@
+{
+  "run_id": "20260603-legacy-current-state",
+  "label": "legacy-current-state",
+  "project": "anserini-frontend",
+  "imported": true,
+  "notes": "Imported the previously root-level frontend workspaces into the canonical projects/<project>/runs layout on 2026-06-03."
+}
