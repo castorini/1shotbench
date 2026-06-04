@@ -1,9 +1,7 @@
 .env
 .codex-private/
 __pycache__/
-runs/
-evals/*
-!evals/.gitkeep
+/evals/
 node_modules/
 **/node_modules/
 **/.next/
@@ -12,7 +10,6 @@ node_modules/
 **/coverage/
 **/playwright-report/
 **/test-results/
-**/runs/
 *.log
 *.pid
 

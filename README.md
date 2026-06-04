@@ -4,31 +4,35 @@ Pi Bench runs the same task prompt through multiple Pi agent workspaces so you c
 
 The old Codex proxy path has been removed. Each model now runs through the `pi` CLI directly, using a small `bench.toml` file inside its workspace.
 
-## Workspace Layout
+## Project Layout
 
-Task workspaces live in task-specific directories. The current task is:
+Benchmark definitions live under `projects/`. Each project keeps its PRD/features at the project root and its historical batch runs under `runs/`.
 
 ```text
-anserini-frontend/
-  PRDv2.md
-  gpt-workspace/
-    PRDv2.md -> ../PRDv2.md
-    bench.toml
-  claude-workspace/
-    PRDv2.md -> ../PRDv2.md
-    bench.toml
-  gemini-workspace/
-    PRDv2.md -> ../PRDv2.md
-    bench.toml
+projects/
+  anserini-frontend/
+    PRD.md
+    features.yaml
+    project.json
+    runs/
+      20260603-legacy-current-state/
+        gpt/
+          workspace/
+            bench.toml
+        claude/
+          workspace/
+            bench.toml
 
-anserini-evaluator/
-  PRD-anserini-evaluator.md
-  gpt-workspace/
-    PRD-anserini-evaluator.md -> ../PRD-anserini-evaluator.md
-    bench.toml
+  anserini-evaluator/
+    PRD.md
+    features.yaml
+    project.json
+    runs/
+      20260523-032002-d5f3fc6f/
+      20260603-legacy-current-state/
 ```
 
-Future benchmark tasks can live as sibling directories with the same `*-workspace/bench.toml` structure.
+A run is one batch benchmark invocation under a project. Each implementation inside a run gets its own folder, and the actual agent-produced specimen lives in that implementation's `workspace/` directory.
 
 Each workspace config supports:
 
@@ -51,7 +55,7 @@ The runner executes Pi from the workspace directory with:
 pi --mode json --print --no-session --provider <provider> --model <model> [prompt]
 ```
 
-Task files matching `PRD*.md`, `TASK*.md`, `task*.md`, or `prompt*.md` should live in the task directory, not the repo root. They are symlinked into every model workspace before each run. For example, `anserini-frontend/PRDv2.md` is available to every Anserini frontend agent as `./PRDv2.md` from inside its workspace.
+Task files matching `PRD*.md`, `TASK*.md`, `task*.md`, or `prompt*.md` should live in the project directory, not the repo root. They are symlinked into every implementation workspace before each run.
 
 ## Workspace Isolation
 
@@ -65,7 +69,7 @@ This is workspace isolation, not a full container. Agents can still use allowed 
 
 Use `.codex-private/` for notes intended for Codex but not Pi benchmark agents. The directory is gitignored, and Pi Bench adds it to every generated sandbox profile as a denied read/write path.
 
-Do not put benchmark instructions for Pi agents there. Use task-local files such as `anserini-frontend/PRDv2.md` for agent-visible task prompts.
+Do not put benchmark instructions for Pi agents there. Use project-local files such as `projects/anserini-frontend/PRD.md` for agent-visible task prompts.
 
 ## Pi Auth And Keys
 
@@ -147,36 +151,15 @@ This copies Anserini's `.agents/skills` directory into this repo's `.agents/skil
 
 Preflight fails if any declared `required_skills` are missing from `.agents/skills`, `.pi/skills`, `~/.pi/agent/skills`, or `~/.agents/skills`.
 
-## Creating Workspaces
+## Creating Run Scaffolds
 
-Create or refresh the standard model workspace folders for a task with:
-
-```sh
-python scripts/create_agent_workspaces.py anserini-frontend
-```
-
-By default, the script creates:
-
-- `gpt-workspace`
-- `claude-workspace`
-- `gemini-workspace`
-- `glm-workspace`
-- `kimi-workspace`
-- `minimax-workspace`
-
-It writes missing `bench.toml` files using the current benchmark defaults and symlinks task-local files such as `PRDv2.md` into each workspace. It does not overwrite existing `bench.toml` files unless you pass `--force`.
-
-Run a non-default task directory with:
+Create a canonical run scaffold for a project with:
 
 ```sh
-python -m bench.cli --task-dir anserini-frontend --prompt "..." --models gpt claude
+python scripts/create_agent_workspaces.py projects/anserini-frontend --run-id 20260603-153937
 ```
 
-The web server uses `anserini-frontend` by default. To point it at another sibling task directory:
-
-```sh
-PI_BENCH_TASK_DIR=other-task uvicorn bench.web:app --port 4010
-```
+It creates `projects/<project>/runs/<run-id>/<model>/workspace/bench.toml` for the default model catalog and symlinks project-local task files into each workspace. It does not overwrite existing `bench.toml` files unless you pass `--force`.
 
 ## Web app feature evaluation
 
@@ -193,9 +176,9 @@ Run a full evaluation with a curated feature file:
 
 ```sh
 python3 -m bench.web_eval \
-  --project anserini-evaluator/gpt-workspace \
-  --features anserini-evaluator/features.yaml \
-  --prd anserini-evaluator/PRD-anserini-evaluator.md \
+  --project projects/anserini-evaluator/runs/20260603-legacy-current-state/gpt \
+  --features projects/anserini-evaluator/features.yaml \
+  --prd projects/anserini-evaluator/PRD.md \
   --label gpt-evaluator
 ```
 
@@ -203,8 +186,8 @@ Or generate the feature file from the PRD at evaluation time:
 
 ```sh
 python3 -m bench.web_eval \
-  --project anserini-evaluator/gpt-workspace \
-  --prd anserini-evaluator/PRD-anserini-evaluator.md \
+  --project projects/anserini-evaluator/runs/20260603-legacy-current-state/gpt \
+  --prd projects/anserini-evaluator/PRD.md \
   --label gpt-evaluator-generated
 ```
 
@@ -221,7 +204,7 @@ Useful options:
 - `--no-agentic-evidence` to use only scripted Playwright steps
 - `--max-generated-features 8` to cap PRD-generated feature checks
 
-Artifacts are written to `evals/<eval_id>/`:
+For canonical implementation folders, artifacts are written to `<implementation>/evals/<eval_id>/`:
 
 - `summary.json`, `report.md`, `run.json`, `setup.json`, `setup-context.json`
 - `generated-features.yaml` when `--features` is omitted
@@ -242,12 +225,12 @@ python -m bench.cli --prompt "Your task prompt" --models gpt claude gemini
 Or read the prompt from a file:
 
 ```sh
-python -m bench.cli --task-dir anserini-frontend --prompt-file anserini-frontend/PRDv2.md --models gpt claude gemini glm kimi minimax
+python -m bench.cli --project anserini-frontend --prompt-file projects/anserini-frontend/PRD.md --models gpt claude gemini glm kimi minimax
 ```
 
 Useful options:
 
-- `--task-dir anserini-frontend`
+- `--project anserini-frontend`
 - `--prompt-file path/to/prompt.txt`
 - `--mode sequential|parallel`
 - `--max-concurrency 2`
@@ -259,11 +242,11 @@ Useful options:
 The CLI flow is:
 
 1. It reads the prompt from `--prompt` or `--prompt-file`.
-2. It loads `*-workspace/bench.toml` files from `--task-dir`, `PI_BENCH_TASK_DIR`, or the default `anserini-frontend`.
-3. It runs preflight checks for the selected model keys, the workspace folders, the `pi` executable, a sandbox backend (`sandbox-exec` or `bwrap`), and any declared `required_skills`.
-4. It symlinks task-local files matching `PRD*.md`, `TASK*.md`, `task*.md`, or `prompt*.md` into every configured workspace.
-5. It creates a fresh `runs/<run_id>/` directory and writes the exact prompt to `prompt.txt`.
-6. It starts one Pi subprocess per selected workspace, either sequentially or in parallel with `--max-concurrency`.
+2. It loads model configs for the selected project and any legacy overrides that still exist in that project root.
+3. It runs preflight checks for the selected model keys, the `pi` executable, a sandbox backend (`sandbox-exec` or `bwrap`), and any declared `required_skills`.
+4. It creates a fresh `projects/<project>/runs/<run_id>/` directory, materializes one implementation workspace per selected model, and symlinks project-local task files into those workspaces.
+5. It writes the exact prompt to `prompt.txt`.
+6. It starts one Pi subprocess per selected implementation, either sequentially or in parallel with `--max-concurrency`.
 7. It writes per-model logs and a combined summary when the run finishes.
 
 For each selected model, `bench.toml` is converted into Pi CLI flags. This config:
@@ -281,14 +264,14 @@ becomes:
 pi --mode json --print --no-session --provider anthropic --model claude-sonnet-4-6 --thinking high --tools read,bash,edit,write,grep,find,ls <prompt>
 ```
 
-The runner sets the subprocess working directory to that model's workspace, so task files such as `./PRDv2.md` or `./PRD-anserini-evaluator.md` and any files the agent creates are local to that model. It also loads this project's `.env` into the subprocess environment before launching Pi.
+The runner sets the subprocess working directory to that implementation's `workspace/`, so project task files such as `./PRD.md` and any files the agent creates are local to that implementation. It also loads this project's `.env` into the subprocess environment before launching Pi.
 
 On macOS, each subprocess is wrapped with `sandbox-exec`. On Linux, each subprocess is wrapped with `bwrap`. The generated sandbox profile denies reads and writes to the other configured model workspaces plus `.codex-private/`.
 
 Artifacts are written to:
 
 ```text
-runs/<run_id>/
+projects/<project>/runs/<run_id>/
 ```
 
 Each run includes:

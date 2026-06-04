@@ -1,10 +1,14 @@
 # Agent Instructions
 
+## Handoff Context
+
+If `HANDOFF.md` is present in the repository root, treat it as supplemental project context. It may describe the codebase purpose, project structure, current progress, active problems, and other implementation notes, and should be referenced as needed while working.
+
 ## Preserve Agent Workspaces
 
-Directories named `*-workspace/` contain one-shot implementations produced by benchmark agents. Treat them as benchmark specimens.
+Directories matching `projects/*/runs/*/*/workspace/` contain one-shot implementations produced by benchmark agents. Treat them as benchmark specimens.
 
-Do not edit agent implementation files after the original one-shot run unless the user explicitly asks for that workspace to be modified. This includes source files, app code, tests, README files, package manifests, and profile/config files inside any `*-workspace/` directory.
+Do not edit agent implementation files after the original one-shot run unless the user explicitly asks for that workspace to be modified. This includes source files, app code, tests, README files, package manifests, and profile/config files inside any implementation `workspace/` directory.
 
 For judging/evaluation, limited operational changes inside a workspace are acceptable only when they are setup artifacts the implementation itself would reasonably need, for example:
 
