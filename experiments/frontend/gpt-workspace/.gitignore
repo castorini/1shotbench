@@ -1,0 +1,10 @@
+node_modules/
+.next/
+out/
+.env*.local
+.DS_Store
+rest.log
+rest.pid
+topics.raw
+topics.err
+tsconfig.tsbuildinfo
