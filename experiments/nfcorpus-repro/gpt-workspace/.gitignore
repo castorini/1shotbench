@@ -1,7 +1,0 @@
-node_modules/
-data/
-.cache/
-playwright-report/
-test-results/
-*.log
-.DS_Store

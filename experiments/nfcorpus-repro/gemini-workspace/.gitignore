@@ -1,7 +1,0 @@
-node_modules/
-anserini-*-fatjar.jar
-runs/
-*.log
-.DS_Store
-playwright-report/
-test-results/
