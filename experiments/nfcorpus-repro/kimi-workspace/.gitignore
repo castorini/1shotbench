@@ -1,0 +1,17 @@
+# Runtime caches and generated artifacts
+cache/
+*.log
+
+# Anserini artifacts downloaded during local testing
+anserini-*-fatjar.jar
+run.nfcorpus.bm25.txt
+eval.nfcorpus.bm25.txt
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Playwright
+playwright-report/
+test-results/

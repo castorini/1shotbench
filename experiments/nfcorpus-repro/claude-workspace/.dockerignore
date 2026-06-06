@@ -1,0 +1,13 @@
+cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+tests/
+playwright-report/
+test-results/
+.git/
+*.log
+README.md

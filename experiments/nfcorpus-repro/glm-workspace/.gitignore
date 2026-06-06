@@ -1,0 +1,8 @@
+*.jar
+data/
+__pycache__/
+*.pyc
+node_modules/
+.py-bench-rewrites/
+run.*.txt
+eval.*.txt
