@@ -168,7 +168,9 @@ _RUNNER_COMMANDS = {"npm", "pnpm", "yarn", "bun", "cargo", "make", "git", "npx",
 _OPTIONS_WITH_VALUES = {"--cwd", "--dir", "--filter", "--prefix", "--workspace", "-C", "-F", "-w"}
 
 
-def _shell_tokens(text: str, punctuation: str, *, preserve_newlines: bool = False) -> list[str]:
+def _shell_tokens(
+    text: str, punctuation: str, *, preserve_newlines: bool = False, warn_command: str | None = None
+) -> list[str]:
     try:
         lexer = shlex.shlex(text, posix=True, punctuation_chars=punctuation)
         if preserve_newlines:
@@ -176,7 +178,10 @@ def _shell_tokens(text: str, punctuation: str, *, preserve_newlines: bool = Fals
         lexer.whitespace_split = True
         lexer.commenters = ""
         return list(lexer)
-    except ValueError:
+    except ValueError as exc:
+        if warn_command is not None:
+            excerpt = warn_command if len(warn_command) <= 80 else warn_command[:77] + "..."
+            _warn(f"could not tokenize shell command ({exc}): {excerpt!r}")
         return []
 
 
@@ -218,6 +223,7 @@ def _shell_segments(command: str) -> Iterable[list[str]]:
         _without_heredoc_bodies(command),
         _SHELL_PUNCTUATION,
         preserve_newlines=True,
+        warn_command=command,
     )
     for token in tokens:
         if token in _SHELL_SEPARATORS:

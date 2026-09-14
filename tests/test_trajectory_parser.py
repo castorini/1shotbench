@@ -215,6 +215,18 @@ echo done > output.txt
 """
         self.assertEqual(shell_files_touched(command), ["output.txt"])
 
+    def test_unterminated_quote_warns_and_degrades_gracefully(self) -> None:
+        command = 'echo "unterminated'
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            touched = shell_files_touched(command)
+            action = semantic_action("bash", command, touched)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(action, "execute")
+        self.assertIn("could not tokenize shell command", stderr.getvalue())
+
     def test_process_run_adds_only_missing_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run-1"
