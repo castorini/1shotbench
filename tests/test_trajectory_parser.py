@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -147,6 +148,22 @@ class TrajectoryParserTests(unittest.TestCase):
 
             self.assertIsNone(row["success"])
             self.assertIsNone(row["duration_ms"])
+
+    def test_source_events_path_is_independent_of_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            events_path = Path(tmp) / "run-1" / "gpt" / "events.jsonl"
+            _write_events(events_path, _single_call_events("gpt"))
+
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                from_tmp = parse_events(events_path)[0]["source_events_path"]
+                os.chdir(str(events_path.parent))
+                from_events_dir = parse_events(events_path)[0]["source_events_path"]
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertEqual(from_tmp, from_events_dir)
 
     def test_semantic_action_categories(self) -> None:
         cases = [

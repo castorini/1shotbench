@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
 SCHEMA_VERSION = 1
 OUTPUT_NAME = "trajectory.jsonl"
 
@@ -383,7 +384,7 @@ def semantic_action(tool: str | None, action: str | None, touched: list[str]) ->
 
 def _source_display_path(events_path: Path) -> str:
     try:
-        return str(events_path.resolve().relative_to(Path.cwd().resolve()))
+        return str(events_path.resolve().relative_to(ROOT_DIR))
     except ValueError:
         return str(events_path.resolve())
 
