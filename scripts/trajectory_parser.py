@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""Convert benchmark events.jsonl files into per-run trajectory.jsonl files.
+
+Two output fields have non-obvious semantics:
+- `command_action`'s shape depends on `tool`: the raw shell string for `bash`,
+  a bare path for `read`/`write`/`edit`/`ls`, a synthesized "<pattern> in <path>"
+  for `find`/`grep`, and a JSON dump of `arguments` otherwise.
+- `duration_ms` is the gap between the assistant turn that issued the tool call
+  and the tool result's timestamp, not pure execution wall time — source events
+  carry no timestamp on tool_execution_start to measure that directly.
+"""
 from __future__ import annotations
 
 import argparse
